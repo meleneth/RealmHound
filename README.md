@@ -45,10 +45,11 @@ Join our Discord!
 The Characters toolbar has **Export roster JSON**. It saves observed living
 and graveyard entries by character ID, including duplicate classes and season
 status, with named items and enchants, slot positions, fame, and last live
-observation. Each stat shows its current value, class cap, and number of
-potions needed to max it. Unknown item or enchant names remain `null` alongside
-their IDs. The export marks `complete_roster: false`: it is a cache of observed
-state, and a character absent from it is not proof that the slot is empty.
+observation. The `potions_to_max` section gives the number of potions needed
+for each stat without exporting raw stat values. Unknown item or enchant names
+remain `null` alongside their IDs. The export marks `complete_roster: false`:
+it is a cache of observed state, and a character absent from it is not proof
+that the slot is empty.
 RealmHound does not fetch a new roster merely to export it.
 
 ## Download
