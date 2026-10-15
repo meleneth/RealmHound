@@ -822,24 +822,17 @@ impl CharacterCache {
                 .collect::<Vec<_>>()
         };
         let character_value = |character: &CachedCharacter| {
-            let stats = character
+            let potions_to_max = character
                 .stat_details()
                 .into_iter()
                 .map(|(name, current, max, _)| {
                     let deficit = max.saturating_sub(current).max(0);
-                    let potions_to_max = if name == "HP" || name == "MP" {
+                    let needed = if name == "HP" || name == "MP" {
                         deficit.saturating_add(4) / 5
                     } else {
                         deficit
                     };
-                    (
-                        name.to_string(),
-                        serde_json::json!({
-                            "current": current,
-                            "max": max,
-                            "potions_to_max": potions_to_max,
-                        }),
-                    )
+                    (name.to_string(), serde_json::json!(needed))
                 })
                 .collect::<serde_json::Map<String, serde_json::Value>>();
             serde_json::json!({
@@ -850,7 +843,7 @@ impl CharacterCache {
                 "seasonal": character.seasonal,
                 "dead": character.is_dead,
                 "fame": character.fame,
-                "stats": stats,
+                "potions_to_max": potions_to_max,
                 "maxed_stats": character.maxed_count,
                 "equipment": item_values(&character.equipment),
                 "inventory": item_values(&character.inventory),
@@ -861,7 +854,7 @@ impl CharacterCache {
             })
         };
         serde_json::to_string_pretty(&serde_json::json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "complete_roster": false,
             "completeness_note": "Only characters observed by RealmHound are included; absence is not evidence that a slot is empty.",
             "cache_last_updated": self.last_updated.map(chrono::DateTime::<chrono::Utc>::from),
@@ -2039,20 +2032,25 @@ mod roster_export_tests {
         ];
         cache.characters = vec![seasonal, regular];
         let json: serde_json::Value = serde_json::from_str(&cache.roster_json().unwrap()).unwrap();
-        assert_eq!(json["schema_version"], 2);
+        assert_eq!(json["schema_version"], 3);
         assert_eq!(json["complete_roster"], false);
         assert_eq!(json["living"][0]["character_id"], 11);
         assert_eq!(json["living"][1]["character_id"], 12);
         assert_eq!(json["living"][0]["seasonal"], false);
         assert_eq!(json["living"][1]["seasonal"], true);
-        assert_eq!(json["living"][0]["stats"]["HP"]["potions_to_max"], 2);
-        assert_eq!(json["living"][0]["stats"]["ATT"]["potions_to_max"], 3);
+        assert_eq!(json["living"][0]["potions_to_max"]["HP"], 2);
+        assert_eq!(json["living"][0]["potions_to_max"]["ATT"], 3);
+        assert!(json["living"][0].get("stats").is_none());
         assert!(json["living"][0]["equipment"][0].is_null());
         assert_eq!(json["living"][0]["equipment"][1]["item_id"], 12345);
+        assert!(json["living"][0]["equipment"][1].get("name").is_some());
         assert_eq!(
             json["living"][0]["equipment"][1]["enchants"][0]["enchant_id"],
             101
         );
+        assert!(json["living"][0]["equipment"][1]["enchants"][0]
+            .get("name")
+            .is_some());
     }
 }
 
