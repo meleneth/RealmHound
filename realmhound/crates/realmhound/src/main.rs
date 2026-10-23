@@ -32,8 +32,6 @@ mod discovery;
 mod dock_icon;
 mod enchant_sound;
 mod event_log;
-#[cfg(target_os = "linux")]
-mod linux_status;
 mod memo;
 mod modals;
 mod panels;
@@ -860,17 +858,22 @@ impl BoundedApp {
                     Ok((handle, rx)) => (Some(handle), Some(rx), None),
                     Err(e) => {
                         tracing::warn!("[DISCOVERY] Failed to start capture: {e}");
-                        (None, None, Some(e))
+                        let visible_error = cfg!(target_os = "linux").then_some(e);
+                        (None, None, visible_error)
                     }
                 }
             }
             Ok(_) => {
                 tracing::warn!("[DISCOVERY] No network interfaces found");
-                (None, None, Some("No network interfaces found".to_string()))
+                let visible_error =
+                    cfg!(target_os = "linux").then(|| "No network interfaces found".to_string());
+                (None, None, visible_error)
             }
             Err(e) => {
                 tracing::warn!("[DISCOVERY] Failed to list interfaces: {e}");
-                (None, None, Some(format!("Failed to list interfaces: {e}")))
+                let visible_error =
+                    cfg!(target_os = "linux").then(|| format!("Failed to list interfaces: {e}"));
+                (None, None, visible_error)
             }
         };
 

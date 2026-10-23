@@ -148,12 +148,11 @@ If capture fails, verify the helper and its capability with `/usr/sbin/getcap`, 
 waiting for a connection, enter a realm or change maps to create a fresh game
 connection; the cipher cannot be reconstructed from the middle of an existing
 stream. If sprites or names are missing, check that Steam has downloaded the
-Unity client and inspect `REALMHOUND_GAME_DIR`. Framed packet parse failures
-and unknown protocol IDs are counted in the log without recording payloads.
-Linux automatic self-update is disabled; rebuild and rerun the installer for
-updates. The existing protocol pipeline decodes IPv4 game connections; IPv6
-game connections are a current limitation. Live Steam/Proton packet decoding
-still requires a game-session smoke test on the target machine.
+Unity client and inspect `REALMHOUND_GAME_DIR`. Linux automatic self-update is
+disabled; rebuild and rerun the installer for updates. The existing protocol
+pipeline decodes IPv4 game connections; IPv6 game connections are a current
+limitation. Live Steam/Proton packet decoding still requires a game-session
+smoke test on the target machine.
 
 ### Prerequisites
 

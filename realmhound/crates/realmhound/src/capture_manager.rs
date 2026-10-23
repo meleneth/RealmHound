@@ -12,7 +12,6 @@ use realmhound_core::capture::{
 pub struct CaptureManager {
     /// Available network interfaces (loaded once at startup).
     interfaces: Result<Vec<NetworkInterface>, String>,
-    last_error: Option<String>,
     /// Detected interface name (after auto-detection picks the active one).
     detected_interface: Option<String>,
     /// Whether capture is currently running.
@@ -25,6 +24,7 @@ pub struct CaptureManager {
     detected_interface_rx: Option<tokio::sync::oneshot::Receiver<String>>,
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for CaptureManager {
     fn drop(&mut self) {
         if let Some(handle) = &self.capture_handle {
@@ -41,7 +41,6 @@ impl CaptureManager {
     pub fn new(interfaces: Result<Vec<NetworkInterface>, String>) -> Self {
         Self {
             interfaces,
-            last_error: None,
             detected_interface: None,
             capturing: false,
             capture_handle: None,
@@ -52,29 +51,7 @@ impl CaptureManager {
 
     /// Whether capture is currently running.
     pub fn is_capturing(&self) -> bool {
-        self.capturing && {
-            #[cfg(target_os = "linux")]
-            {
-                self.capture_handle
-                    .as_ref()
-                    .is_none_or(|handle| handle.is_alive())
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                true
-            }
-        }
-    }
-
-    pub fn last_error(&self) -> Option<&str> {
-        self.last_error.as_deref()
-    }
-
-    #[cfg(target_os = "linux")]
-    pub fn packet_count(&self) -> u64 {
-        self.capture_handle
-            .as_ref()
-            .map_or(0, |handle| handle.packet_count())
+        self.capturing
     }
 
     /// The detected interface name, if auto-detection has completed.
@@ -89,19 +66,12 @@ impl CaptureManager {
     pub fn start(&mut self) -> Result<(), String> {
         let interfaces = match &self.interfaces {
             Ok(list) if !list.is_empty() => list.clone(),
-            Ok(_) => {
-                self.last_error = Some("No network interfaces found".into());
-                return Err(self.last_error.clone().unwrap());
-            }
-            Err(e) => {
-                self.last_error = Some(format!("Interface error: {}", e));
-                return Err(self.last_error.clone().unwrap());
-            }
+            Ok(_) => return Err("No network interfaces found".into()),
+            Err(e) => return Err(format!("Interface error: {}", e)),
         };
 
         match start_capture_auto_detect(&interfaces, SnifferConfig::default()) {
             Ok((handle, rx, detected_rx)) => {
-                self.last_error = None;
                 self.capture_handle = Some(handle);
                 self.packet_rx = Some(rx);
                 self.detected_interface_rx = Some(detected_rx);
@@ -114,7 +84,6 @@ impl CaptureManager {
             }
             Err(e) => {
                 let msg = format!("Failed to start capture: {}", e);
-                self.last_error = Some(msg.clone());
                 tracing::error!("{}", msg);
                 Err(msg)
             }
@@ -218,7 +187,6 @@ mod tests {
         let result = mgr.start();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("No network interfaces"));
-        assert!(mgr.last_error().unwrap().contains("No network interfaces"));
         assert!(!mgr.is_capturing());
     }
 

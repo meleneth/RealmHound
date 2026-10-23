@@ -437,10 +437,6 @@ pub struct CaptureHandle {
     stop_flag: Arc<AtomicBool>,
     #[cfg(target_os = "linux")]
     linux_child: Option<Arc<Mutex<std::process::Child>>>,
-    #[cfg(target_os = "linux")]
-    packet_count: Arc<std::sync::atomic::AtomicU64>,
-    #[cfg(target_os = "linux")]
-    linux_alive: Arc<AtomicBool>,
 }
 
 impl CaptureHandle {
@@ -450,10 +446,6 @@ impl CaptureHandle {
             stop_flag: Arc::new(AtomicBool::new(false)),
             #[cfg(target_os = "linux")]
             linux_child: None,
-            #[cfg(target_os = "linux")]
-            packet_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            #[cfg(target_os = "linux")]
-            linux_alive: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -462,29 +454,7 @@ impl CaptureHandle {
         Self {
             stop_flag: Arc::new(AtomicBool::new(false)),
             linux_child: Some(child),
-            packet_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            linux_alive: Arc::new(AtomicBool::new(true)),
         }
-    }
-
-    #[cfg(target_os = "linux")]
-    pub fn is_alive(&self) -> bool {
-        self.linux_alive.load(Ordering::Acquire)
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(super) fn alive_flag(&self) -> Arc<AtomicBool> {
-        self.linux_alive.clone()
-    }
-
-    #[cfg(target_os = "linux")]
-    pub fn packet_count(&self) -> u64 {
-        self.packet_count.load(Ordering::Relaxed)
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(super) fn packet_counter(&self) -> Arc<std::sync::atomic::AtomicU64> {
-        self.packet_count.clone()
     }
 
     /// Stop the capture loop.

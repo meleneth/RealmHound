@@ -143,14 +143,13 @@ pub fn start() -> Result<
         output
             .read_exact(&mut message)
             .map_err(|e| CaptureError::CaptureError(e.to_string()))?;
+        let _ = child.wait();
         return Err(CaptureError::CaptureError(
             String::from_utf8_lossy(&message).into_owned(),
         ));
     }
     let child = Arc::new(Mutex::new(child));
     let handle = CaptureHandle::with_linux_child(child.clone());
-    let packet_count = handle.packet_counter();
-    let alive = handle.alive_flag();
     let (tx, rx) = packet_channel(DEFAULT_QUEUE_CAPACITY);
     let (detected_tx, detected_rx) = tokio::sync::oneshot::channel();
     let _ = detected_tx.send(capture_interface_name(
@@ -158,7 +157,6 @@ pub fn start() -> Result<
     ));
     std::thread::spawn(move || {
         while let Ok(packet) = read_packet(&mut output) {
-            packet_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if tx.send(packet).is_err() {
                 break;
             }
@@ -167,8 +165,7 @@ pub fn start() -> Result<
             let _ = child.kill();
             let _ = child.wait();
         }
-        alive.store(false, std::sync::atomic::Ordering::Release);
-        tracing::warn!("Linux capture helper stopped; capture will need to be restarted");
+        tracing::debug!("Linux capture helper stopped");
     });
     Ok((handle, rx, detected_rx))
 }
