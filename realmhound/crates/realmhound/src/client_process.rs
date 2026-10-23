@@ -278,7 +278,70 @@ mod linux_impl {
     }
 
     pub(super) fn connection_process_start_unix(conn: &ConnectionKey) -> Option<i64> {
-        process_creation_unix(owning_pid(conn)?)
+        owning_pid(conn)
+            .and_then(process_creation_unix)
+            // Reading another process's fd symlinks is subject to Linux ptrace
+            // policy even when both processes have the same uid.  Steam/Proton
+            // therefore commonly exposes the socket in /proc/net/tcp but denies
+            // the inode -> pid walk.  A verified RealmHound connection still
+            // proves that a game is running; use the oldest actual game process
+            // (not the launcher) as the conservative multibox-safe fallback.
+            .or_else(|| earliest_named_client_start_unix().confirmed_start())
+    }
+
+    fn is_rotmg_client_name(name: &str) -> bool {
+        // Linux task names are capped at 15 bytes.  The official client's name
+        // is exactly 15 bytes, while "RotMG Exalt Launcher.exe" is deliberately
+        // excluded: launching/updating alone must not unlock an API refresh.
+        name.trim().eq_ignore_ascii_case("RotMG Exalt.exe")
+    }
+
+    fn earliest_named_client_start_unix_at(
+        proc_root: &Path,
+        uid: u32,
+        ticks_per_second: u64,
+    ) -> ClientStart {
+        let Ok(entries) = std::fs::read_dir(proc_root) else {
+            return ClientStart::Indeterminate;
+        };
+        let mut earliest = None;
+        for entry in entries.flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if process_uid(&entry.path()) != Some(uid) {
+                continue;
+            }
+            let Ok(comm) = std::fs::read_to_string(entry.path().join("comm")) else {
+                continue;
+            };
+            if !is_rotmg_client_name(&comm) {
+                continue;
+            }
+            let Some(start) = process_creation_unix_at(proc_root, pid, ticks_per_second) else {
+                return ClientStart::Indeterminate;
+            };
+            if start <= 0 {
+                return ClientStart::Indeterminate;
+            }
+            earliest = Some(earliest.map_or(start, |best: i64| best.min(start)));
+        }
+        earliest.map_or(ClientStart::NoneRunning, ClientStart::Earliest)
+    }
+
+    fn earliest_named_client_start_unix() -> ClientStart {
+        let proc_root = Path::new("/proc");
+        let Some(uid) = effective_uid(proc_root) else {
+            return ClientStart::Indeterminate;
+        };
+        let Some(ticks) = clock_ticks_per_second() else {
+            return ClientStart::Indeterminate;
+        };
+        earliest_named_client_start_unix_at(proc_root, uid, ticks)
     }
 
     fn earliest_client_start_unix_at(
@@ -320,7 +383,20 @@ mod linux_impl {
         let Some(ticks) = clock_ticks_per_second() else {
             return ClientStart::Indeterminate;
         };
-        earliest_client_start_unix_at(Path::new("/proc"), GAME_SERVER_PORT, ticks)
+        let socket_result =
+            earliest_client_start_unix_at(Path::new("/proc"), GAME_SERVER_PORT, ticks);
+        match socket_result {
+            ClientStart::Earliest(_) => socket_result,
+            // The name fallback also covers the short interval between world
+            // sockets during an area change.  Prefer an indeterminate socket
+            // result when no named client can be confirmed.
+            ClientStart::NoneRunning | ClientStart::Indeterminate => {
+                match earliest_named_client_start_unix() {
+                    named @ ClientStart::Earliest(_) => named,
+                    _ => socket_result,
+                }
+            }
+        }
     }
 
     #[cfg(test)]
@@ -394,6 +470,41 @@ mod linux_impl {
             assert_eq!(
                 earliest_client_start_unix_at(root, GAME_SERVER_PORT, 100),
                 ClientStart::NoneRunning
+            );
+        }
+
+        #[test]
+        fn named_client_fallback_ignores_launcher_and_uses_oldest_game() {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path();
+            std::fs::write(root.join("stat"), "cpu 0 0 0 0\nbtime 1700000000\n").unwrap();
+
+            for (pid, name, ticks) in [
+                (100, "RotMG Exalt Launcher.exe", 100),
+                (200, "RotMG Exalt.exe", 900),
+                (300, "rotmg exalt.exe", 500),
+            ] {
+                std::fs::create_dir_all(root.join(pid.to_string())).unwrap();
+                std::fs::write(
+                    root.join(pid.to_string()).join("status"),
+                    "Uid:\t1000\t1000\t1000\t1000\n",
+                )
+                .unwrap();
+                std::fs::write(root.join(pid.to_string()).join("comm"), format!("{name}\n"))
+                    .unwrap();
+                let mut fields = vec!["0".to_owned(); 20];
+                fields[0] = "S".to_owned();
+                fields[19] = ticks.to_string();
+                std::fs::write(
+                    root.join(pid.to_string()).join("stat"),
+                    format!("{pid} ({name}) {}\n", fields.join(" ")),
+                )
+                .unwrap();
+            }
+
+            assert_eq!(
+                earliest_named_client_start_unix_at(root, 1000, 100),
+                ClientStart::Earliest(1_700_000_005)
             );
         }
     }
