@@ -1,5 +1,5 @@
 //! Narrow Linux capture process protocol. Only this executable needs CAP_NET_RAW.
-//! The pipe contains framed packets; it never carries commands or arbitrary filters.
+//! Stdout contains framed packets; stdin carries no commands and closes with the parent.
 
 use super::sniffer::MAX_CAPTURE_FRAME;
 use super::{
@@ -8,6 +8,7 @@ use super::{
 };
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 fn capture_interface_name(override_name: Option<String>) -> String {
@@ -16,8 +17,25 @@ fn capture_interface_name(override_name: Option<String>) -> String {
         .unwrap_or_else(|| "any".into())
 }
 
+fn wait_for_parent_disconnect(mut input: impl Read, disconnected: &AtomicBool) {
+    let mut buffer = [0u8; 16];
+    loop {
+        match input.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+    disconnected.store(true, Ordering::Release);
+}
+
 /// Entry point for the separately installed, capability-bearing executable.
 pub fn run() -> Result<(), String> {
+    let parent_disconnected = Arc::new(AtomicBool::new(false));
+    let disconnect_signal = parent_disconnected.clone();
+    std::thread::spawn(move || {
+        wait_for_parent_disconnect(std::io::stdin(), &disconnect_signal);
+    });
+
     let name = capture_interface_name(std::env::var("REALMHOUND_CAPTURE_INTERFACE").ok());
     let iface = NetworkInterface {
         name,
@@ -43,7 +61,7 @@ pub fn run() -> Result<(), String> {
     stdout.write_all(&[0]).map_err(|e| e.to_string())?;
     stdout.flush().map_err(|e| e.to_string())?;
     let mut oversized_dropped = 0u64;
-    loop {
+    while !parent_disconnected.load(Ordering::Acquire) {
         match sniffer.next_packet() {
             Ok(Some(packet)) => {
                 if packet.data.len() > MAX_CAPTURE_FRAME {
@@ -74,6 +92,7 @@ pub fn run() -> Result<(), String> {
             Err(error) => return Err(error.to_string()),
         }
     }
+    Ok(())
 }
 
 fn read_packet(input: &mut impl Read) -> std::io::Result<RawPacket> {
@@ -116,7 +135,7 @@ pub fn start() -> Result<
 > {
     let exe = std::env::current_exe().map_err(|e| CaptureError::CaptureError(e.to_string()))?;
     let helper = exe.with_file_name("realmhound-capture");
-    let mut child = Command::new(&helper).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+    let mut child = Command::new(&helper).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
         .map_err(|e| CaptureError::CaptureError(format!("Cannot launch {}: {e}. Install the Linux capture helper beside RealmHound and run the one-time setup.", helper.display())))?;
     let mut output = child.stdout.take().unwrap();
     let errors = child.stderr.take().unwrap();
@@ -168,6 +187,16 @@ pub fn start() -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closed_parent_pipe_signals_disconnect() {
+        let disconnected = AtomicBool::new(false);
+
+        wait_for_parent_disconnect(std::io::empty(), &disconnected);
+
+        assert!(disconnected.load(Ordering::Acquire));
+    }
+
     #[test]
     fn frame_round_trip() {
         let packet = RawPacket {
