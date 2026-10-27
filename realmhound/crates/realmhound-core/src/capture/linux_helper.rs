@@ -7,9 +7,13 @@ use super::{
     RawPacket, Sniffer, SnifferConfig, DEFAULT_QUEUE_CAPACITY,
 };
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn capture_interface_name(override_name: Option<String>) -> String {
     override_name
@@ -26,6 +30,68 @@ fn wait_for_parent_disconnect(mut input: impl Read, disconnected: &AtomicBool) {
         }
     }
     disconnected.store(true, Ordering::Release);
+}
+
+fn read_startup_response(input: &mut impl Read) -> std::io::Result<Option<String>> {
+    let mut status = [0];
+    input.read_exact(&mut status)?;
+    if status[0] == 0 {
+        return Ok(None);
+    }
+
+    let mut len = [0; 2];
+    input.read_exact(&mut len)?;
+    let mut message = vec![0; u16::from_be_bytes(len) as usize];
+    input.read_exact(&mut message)?;
+    Ok(Some(String::from_utf8_lossy(&message).into_owned()))
+}
+
+fn kill_and_wait(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn await_startup(
+    mut output: ChildStdout,
+    child: &mut Child,
+    timeout: Duration,
+) -> Result<ChildStdout, CaptureError> {
+    let (startup_tx, startup_rx) = std::sync::mpsc::sync_channel(1);
+    let startup_reader = std::thread::spawn(move || {
+        let response = read_startup_response(&mut output);
+        let _ = startup_tx.send((output, response));
+    });
+    let output = match startup_rx.recv_timeout(timeout) {
+        Ok((output, Ok(None))) => output,
+        Ok((_output, Ok(Some(message)))) => {
+            kill_and_wait(child);
+            let _ = startup_reader.join();
+            return Err(CaptureError::CaptureError(message));
+        }
+        Ok((_output, Err(error))) => {
+            kill_and_wait(child);
+            let _ = startup_reader.join();
+            return Err(CaptureError::CaptureError(format!(
+                "Capture helper exited during startup: {error}"
+            )));
+        }
+        Err(RecvTimeoutError::Timeout) => {
+            kill_and_wait(child);
+            return Err(CaptureError::CaptureError(format!(
+                "Capture helper did not respond within {} seconds",
+                timeout.as_secs_f64()
+            )));
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            kill_and_wait(child);
+            let _ = startup_reader.join();
+            return Err(CaptureError::CaptureError(
+                "Capture helper startup reader stopped unexpectedly".into(),
+            ));
+        }
+    };
+    let _ = startup_reader.join();
+    Ok(output)
 }
 
 /// Entry point for the separately installed, capability-bearing executable.
@@ -137,31 +203,14 @@ pub fn start() -> Result<
     let helper = exe.with_file_name("realmhound-capture");
     let mut child = Command::new(&helper).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
         .map_err(|e| CaptureError::CaptureError(format!("Cannot launch {}: {e}. Install the Linux capture helper beside RealmHound and run the one-time setup.", helper.display())))?;
-    let mut output = child.stdout.take().unwrap();
+    let output = child.stdout.take().unwrap();
     let errors = child.stderr.take().unwrap();
     std::thread::spawn(move || {
         for line in BufReader::new(errors).lines().map_while(Result::ok) {
             tracing::warn!("Linux capture helper: {line}");
         }
     });
-    let mut status = [0];
-    output.read_exact(&mut status).map_err(|e| {
-        CaptureError::CaptureError(format!("Capture helper exited during startup: {e}"))
-    })?;
-    if status[0] != 0 {
-        let mut len = [0; 2];
-        output
-            .read_exact(&mut len)
-            .map_err(|e| CaptureError::CaptureError(e.to_string()))?;
-        let mut message = vec![0; u16::from_be_bytes(len) as usize];
-        output
-            .read_exact(&mut message)
-            .map_err(|e| CaptureError::CaptureError(e.to_string()))?;
-        let _ = child.wait();
-        return Err(CaptureError::CaptureError(
-            String::from_utf8_lossy(&message).into_owned(),
-        ));
-    }
+    let mut output = await_startup(output, &mut child, STARTUP_TIMEOUT)?;
     let child = Arc::new(Mutex::new(child));
     let handle = CaptureHandle::with_linux_child(child.clone());
     let (tx, rx) = packet_channel(DEFAULT_QUEUE_CAPACITY);
@@ -176,8 +225,7 @@ pub fn start() -> Result<
             }
         }
         if let Ok(mut child) = child.lock() {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_and_wait(&mut child);
         }
         tracing::debug!("Linux capture helper stopped");
     });
@@ -195,6 +243,54 @@ mod tests {
         wait_for_parent_disconnect(std::io::empty(), &disconnected);
 
         assert!(disconnected.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn reads_ready_startup_response() {
+        assert_eq!(read_startup_response(&mut [0].as_slice()).unwrap(), None);
+    }
+
+    #[test]
+    fn reads_error_startup_response() {
+        let mut response = [1, 0, 4, b'o', b'o', b'p', b's'].as_slice();
+
+        assert_eq!(
+            read_startup_response(&mut response).unwrap(),
+            Some("oops".into())
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_startup_response() {
+        let error = read_startup_response(&mut [1, 0, 4, b'o'].as_slice()).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn startup_timeout_kills_and_reaps_child() {
+        let mut child = Command::new("sleep")
+            .arg("60")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = child.stdout.take().unwrap();
+
+        let error = await_startup(output, &mut child, Duration::from_millis(50)).unwrap_err();
+
+        assert!(error.to_string().contains("did not respond"));
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn startup_read_error_reaps_child() {
+        let mut child = Command::new("true").stdout(Stdio::piped()).spawn().unwrap();
+        let output = child.stdout.take().unwrap();
+
+        let error = await_startup(output, &mut child, Duration::from_secs(1)).unwrap_err();
+
+        assert!(error.to_string().contains("exited during startup"));
+        assert!(child.try_wait().unwrap().is_some());
     }
 
     #[test]
