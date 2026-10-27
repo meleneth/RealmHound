@@ -17,23 +17,47 @@ pub const DEFAULT_QUEUE_CAPACITY: usize = 4096;
 
 /// Packet framing, with stable identifiers used in `.rhcap` version 2 files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
 pub enum PacketFormat {
     /// Ethernet II, including VLAN-tagged frames.
-    Ethernet = 0,
+    Ethernet,
     /// IP packets without a link-layer header.
-    RawIp = 1,
+    RawIp,
     /// DLT_NULL: a native-endian, four-byte address family followed by IP.
-    Loopback = 2,
+    Loopback,
     /// DLT_LOOP: a network-endian, four-byte address family followed by IP.
-    LoopbackNetwork = 3,
+    LoopbackNetwork,
     /// Linux cooked capture v1 (the `any` device).
-    LinuxSll = 4,
+    LinuxSll,
     /// Linux cooked capture v2.
-    LinuxSll2 = 5,
+    LinuxSll2,
 }
 
 impl PacketFormat {
+    /// Return the stable identifier used by capture protocols and files.
+    pub(crate) const fn code(self) -> u8 {
+        match self {
+            Self::Ethernet => 0,
+            Self::RawIp => 1,
+            Self::Loopback => 2,
+            Self::LoopbackNetwork => 3,
+            Self::LinuxSll => 4,
+            Self::LinuxSll2 => 5,
+        }
+    }
+
+    /// Decode a stable identifier used by capture protocols and files.
+    pub(crate) const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Ethernet),
+            1 => Some(Self::RawIp),
+            2 => Some(Self::Loopback),
+            3 => Some(Self::LoopbackNetwork),
+            4 => Some(Self::LinuxSll),
+            5 => Some(Self::LinuxSll2),
+            _ => None,
+        }
+    }
+
     fn from_linktype(linktype: pcap::Linktype) -> Result<Self, CaptureError> {
         match linktype {
             pcap::Linktype::ETHERNET => Ok(Self::Ethernet),
@@ -734,6 +758,22 @@ fn capture_remaining(mut sniffer: Sniffer, stop_flag: Arc<AtomicBool>, tx: Packe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packet_format_codes_round_trip() {
+        for (format, code) in [
+            (PacketFormat::Ethernet, 0),
+            (PacketFormat::RawIp, 1),
+            (PacketFormat::Loopback, 2),
+            (PacketFormat::LoopbackNetwork, 3),
+            (PacketFormat::LinuxSll, 4),
+            (PacketFormat::LinuxSll2, 5),
+        ] {
+            assert_eq!(format.code(), code);
+            assert_eq!(PacketFormat::from_code(code), Some(format));
+        }
+        assert_eq!(PacketFormat::from_code(u8::MAX), None);
+    }
 
     #[test]
     fn recognizes_supported_linktypes() {

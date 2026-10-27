@@ -17,22 +17,6 @@ fn capture_interface_name(override_name: Option<String>) -> String {
         .unwrap_or_else(|| "any".into())
 }
 
-fn format_byte(format: PacketFormat) -> u8 {
-    format as u8
-}
-
-fn decode_format(byte: u8) -> Option<PacketFormat> {
-    Some(match byte {
-        0 => PacketFormat::Ethernet,
-        1 => PacketFormat::RawIp,
-        2 => PacketFormat::Loopback,
-        3 => PacketFormat::LoopbackNetwork,
-        4 => PacketFormat::LinuxSll,
-        5 => PacketFormat::LinuxSll2,
-        _ => return None,
-    })
-}
-
 /// Entry point for the separately installed, capability-bearing executable.
 pub fn run() -> Result<(), String> {
     let name = capture_interface_name(std::env::var("REALMHOUND_CAPTURE_INTERFACE").ok());
@@ -71,7 +55,7 @@ pub fn run() -> Result<(), String> {
                     .write_all(&(packet.data.len() as u32).to_be_bytes())
                     .map_err(|e| e.to_string())?;
                 stdout
-                    .write_all(&[format_byte(packet.packet_format)])
+                    .write_all(&[packet.packet_format.code()])
                     .map_err(|e| e.to_string())?;
                 stdout
                     .write_all(&secs.to_be_bytes())
@@ -97,7 +81,7 @@ fn read_packet(input: &mut impl Read) -> std::io::Result<RawPacket> {
             "capture frame too large",
         ));
     }
-    let format = decode_format(header[4]).ok_or_else(|| {
+    let format = PacketFormat::from_code(header[4]).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid capture format")
     })?;
     let secs = i64::from_be_bytes(header[5..13].try_into().unwrap());
@@ -184,7 +168,7 @@ mod tests {
         };
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&(packet.data.len() as u32).to_be_bytes());
-        bytes.push(format_byte(packet.packet_format));
+        bytes.push(packet.packet_format.code());
         bytes.extend_from_slice(&packet.timestamp.timestamp().to_be_bytes());
         bytes.extend_from_slice(&packet.timestamp.timestamp_subsec_nanos().to_be_bytes());
         bytes.extend_from_slice(&packet.data);
