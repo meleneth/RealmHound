@@ -15,6 +15,11 @@ use std::time::Duration;
 /// bound worst-case memory if the consumer fully stalls.
 pub const DEFAULT_QUEUE_CAPACITY: usize = 4096;
 
+/// Maximum packet size captured by libpcap and accepted by the Linux helper protocol.
+///
+/// This is libpcap's maximum snapshot length for ordinary link-layer captures.
+pub(crate) const MAX_CAPTURE_FRAME: usize = 262_144;
+
 /// Packet framing, with stable identifiers used in `.rhcap` version 2 files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PacketFormat {
@@ -139,6 +144,7 @@ impl Sniffer {
                 name: interface.name.clone(),
                 reason: e.to_string(),
             })?
+            .snaplen(MAX_CAPTURE_FRAME as i32)
             .timeout(config.timeout_ms)
             .buffer_size(config.buffer_size)
             .promisc(config.promiscuous)
